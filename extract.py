@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """
-PDF Fatura -> Excel + AI Destekli Kategorize Aracı
-====================================================
+PDF Invoice -> Excel + AI-Powered Categorization Tool
+======================================================
 
-Bir PDF faturayı okur, kalem satırlarını (açıklama/miktar/birim fiyat/tutar)
-tablo olarak çıkarır, her kalemi bir muhasebe kategorisine ayırır ve
-biçimlendirilmiş bir Excel raporu (detay + özet sayfası) üretir.
+Reads a PDF invoice, extracts its line items (description/qty/unit price/
+total) as a table, categorizes each item, and produces a formatted Excel
+report (detail + summary sheet).
 
-İki mod:
-  - AI modu:  ANTHROPIC_API_KEY ortam değişkeni ayarlıysa, kategorizasyon
-              Claude ile yapılır (açıklaması belirsiz/çeşitli kalemlerde
-              çok daha isabetli sonuç verir).
-  - Fallback: API anahtarı yoksa basit anahtar kelime eşlemesiyle
-              kategorize eder — API key olmadan da uçtan uca çalışır.
+Two modes:
+  - AI mode:      if ANTHROPIC_API_KEY is set, categorization is done via
+                   Claude (much more accurate on vague/varied item
+                   descriptions).
+  - Fallback mode: without an API key, falls back to keyword matching —
+                   works end-to-end with no API key required.
 
-Kullanım:
-    python extract.py sample_data/fatura_ornek.pdf -o output/rapor.xlsx
-    python extract.py fatura.pdf -o rapor.xlsx --no-ai   # AI'yı zorla kapat
+Output language: --lang en (default) or --lang tr — controls the column
+headers and category names in the generated Excel file, independent of
+the language the source invoice is written in.
+
+Usage:
+    python extract.py sample_data/invoice_sample_en.pdf -o output/report.xlsx
+    python extract.py sample_data/fatura_ornek.pdf -o output/rapor.xlsx --lang tr
+    python extract.py invoice.pdf -o report.xlsx --no-ai   # force AI off
 """
 from __future__ import annotations
 
@@ -31,26 +36,64 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-CATEGORIES = [
-    "Ofis Malzemesi",
-    "Yazılım/Lisans",
-    "Ulaşım",
-    "Yemek/İkram",
-    "Danışmanlık",
-    "Diğer",
-]
+# --------------------------------------------------------------------------
+# Language packs — column headers, category names, keyword rules, labels
+# --------------------------------------------------------------------------
 
-KEYWORD_MAP = {
-    "Yazılım/Lisans": ["yazılım", "lisans", "bulut", "abonelik", "software", "subscription"],
-    "Ulaşım": ["taksi", "otobüs", "uçak", "yakıt", "benzin", "ulaşım", "transfer"],
-    "Yemek/İkram": ["yemek", "kahve", "ikram", "catering", "restoran"],
-    "Danışmanlık": ["danışman", "consulting", "hizmet bedeli"],
-    "Ofis Malzemesi": ["kağıt", "kalem", "mouse", "klavye", "ofis", "toner", "dosya"],
+LANGS = {
+    "en": {
+        "categories": ["Office Supplies", "Software/Licenses", "Transport", "Meals/Catering", "Consulting", "Other"],
+        "keyword_map": {
+            "Software/Licenses": ["software", "license", "cloud", "subscription", "saas"],
+            "Transport": ["taxi", "uber", "flight", "fuel", "gas", "transport", "transfer", "mileage"],
+            "Meals/Catering": ["meal", "coffee", "catering", "restaurant", "lunch", "dinner"],
+            "Consulting": ["consult", "consulting", "service fee", "advisory"],
+            "Office Supplies": ["paper", "pen", "mouse", "keyboard", "office", "toner", "folder", "stationery"],
+        },
+        "columns": ["Description", "Qty", "Unit Price", "Total", "Category"],
+        "sheet_detail": "Invoice Detail",
+        "sheet_summary": "Summary",
+        "summary_labels": {"invoice_no": "Invoice No", "date": "Date", "vendor": "Vendor"},
+        "summary_headers": ["Category", "Total"],
+        "grand_total": "GRAND TOTAL",
+        "currency_format": "#,##0.00",
+        "header_patterns": {
+            "invoice_no": r"Invoice\s*(?:No\.?|Number):?\s*(.+)",
+            "date": r"Date:?\s*([\d./-]+)",
+            "vendor": r"Vendor:?\s*(.+)",
+        },
+        "table_header_markers": ["description"],
+        "other_category": "Other",
+    },
+    "tr": {
+        "categories": ["Ofis Malzemesi", "Yazılım/Lisans", "Ulaşım", "Yemek/İkram", "Danışmanlık", "Diğer"],
+        "keyword_map": {
+            "Yazılım/Lisans": ["yazılım", "lisans", "bulut", "abonelik", "software", "subscription"],
+            "Ulaşım": ["taksi", "otobüs", "uçak", "yakıt", "benzin", "ulaşım", "transfer"],
+            "Yemek/İkram": ["yemek", "kahve", "ikram", "catering", "restoran"],
+            "Danışmanlık": ["danışman", "consulting", "hizmet bedeli"],
+            "Ofis Malzemesi": ["kağıt", "kalem", "mouse", "klavye", "ofis", "toner", "dosya"],
+        },
+        "columns": ["Açıklama", "Miktar", "Birim Fiyat", "Tutar", "Kategori"],
+        "sheet_detail": "Fatura Detay",
+        "sheet_summary": "Özet",
+        "summary_labels": {"invoice_no": "Fatura No", "date": "Tarih", "vendor": "Satıcı"},
+        "summary_headers": ["Kategori", "Toplam Tutar"],
+        "grand_total": "GENEL TOPLAM",
+        "currency_format": "#,##0.00 TL",
+        "header_patterns": {
+            "invoice_no": r"Fatura No:?\s*(.+)",
+            "date": r"Tarih:?\s*([\d./-]+)",
+            "vendor": r"Sat[ıi]c[ıi]:?\s*(.+)",
+        },
+        "table_header_markers": ["açıklama", "aciklama"],
+        "other_category": "Diğer",
+    },
 }
 
 
 # --------------------------------------------------------------------------
-# PDF'den ham veri çıkarımı
+# Raw extraction from the PDF
 # --------------------------------------------------------------------------
 
 def extract_text(pdf_path: Path) -> str:
@@ -58,15 +101,16 @@ def extract_text(pdf_path: Path) -> str:
         return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
 
-def extract_line_items(pdf_path: Path) -> list[dict]:
+def extract_line_items(pdf_path: Path, lang: dict) -> list[dict]:
     items = []
+    markers = lang["table_header_markers"]
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             for table in page.extract_tables():
                 if not table:
                     continue
                 header = [c.strip().lower() if c else "" for c in table[0]]
-                if not any("açıklama" in h or "aciklama" in h for h in header):
+                if not any(marker in h for h in header for marker in markers):
                     continue
                 for row in table[1:]:
                     if not row or len(row) < 4 or not row[0]:
@@ -74,71 +118,86 @@ def extract_line_items(pdf_path: Path) -> list[dict]:
                     desc, qty, unit_price, total = row[:4]
                     items.append(
                         {
-                            "aciklama": desc.strip(),
-                            "miktar": _to_number(qty),
-                            "birim_fiyat": _to_number(unit_price),
-                            "tutar": _to_number(total),
+                            "description": desc.strip(),
+                            "qty": _to_number(qty),
+                            "unit_price": _to_number(unit_price),
+                            "total": _to_number(total),
                         }
                     )
     return items
 
 
-def extract_header_fields(text: str) -> dict:
+def extract_header_fields(text: str, lang: dict) -> dict:
     def find(pattern, default=""):
         m = re.search(pattern, text, flags=re.IGNORECASE)
         return m.group(1).strip() if m else default
 
+    p = lang["header_patterns"]
     return {
-        "fatura_no": find(r"Fatura No:?\s*(.+)"),
-        "tarih": find(r"Tarih:?\s*([\d.\/\-]+)"),
-        "satici": find(r"Sat[ıi]c[ıi]:?\s*(.+)"),
+        "invoice_no": find(p["invoice_no"]),
+        "date": find(p["date"]),
+        "vendor": find(p["vendor"]),
     }
 
 
 def _to_number(raw: str) -> float:
+    """Parses a number whether it's formatted EU-style (1.200,00) or
+    US/UK-style (1,200.00) — auto-detects based on separator order/shape,
+    so it works correctly regardless of the invoice's source language."""
     if raw is None:
         return 0.0
-    cleaned = raw.strip().replace(".", "").replace(",", ".") if "," in raw else raw.strip()
+    cleaned = re.sub(r"[^\d.,-]", "", raw.strip())
+    if not cleaned:
+        return 0.0
+
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")  # 1.200,00
+        else:
+            cleaned = cleaned.replace(",", "")  # 1,200.00
+    elif "," in cleaned:
+        # ambiguous: 2 digits after last comma -> decimal sep, else thousands sep
+        tail = cleaned.split(",")[-1]
+        cleaned = cleaned.replace(",", ".") if len(tail) == 2 else cleaned.replace(",", "")
+
     try:
         return float(cleaned)
     except ValueError:
-        try:
-            return float(raw.strip())
-        except ValueError:
-            return 0.0
+        return 0.0
 
 
 # --------------------------------------------------------------------------
-# Kategorizasyon
+# Categorization
 # --------------------------------------------------------------------------
 
-def categorize_with_keywords(items: list[dict]) -> list[dict]:
+def categorize_with_keywords(items: list[dict], lang: dict) -> list[dict]:
     for item in items:
-        desc_lower = item["aciklama"].lower()
-        category = "Diğer"
-        for cat, keywords in KEYWORD_MAP.items():
+        desc_lower = item["description"].lower()
+        category = lang["other_category"]
+        for cat, keywords in lang["keyword_map"].items():
             if any(kw in desc_lower for kw in keywords):
                 category = cat
                 break
-        item["kategori"] = category
+        item["category"] = category
     return items
 
 
-def categorize_with_ai(items: list[dict]) -> list[dict]:
+def categorize_with_ai(items: list[dict], lang: dict) -> list[dict]:
     import anthropic
 
     client = anthropic.Anthropic()
-    descriptions = [item["aciklama"] for item in items]
+    descriptions = [item["description"] for item in items]
+    categories = lang["categories"]
 
-    prompt = f"""Aşağıdaki fatura kalemlerinin her birini şu kategorilerden
-birine ata: {", ".join(CATEGORIES)}.
+    prompt = f"""Assign each of the following invoice line items to exactly
+one of these categories: {", ".join(categories)}.
 
-Kalemler (sırasıyla):
+Items (in order):
 {json.dumps(descriptions, ensure_ascii=False, indent=2)}
 
-SADECE şu formatta bir JSON listesi döndür, başka hiçbir açıklama ekleme:
-["Kategori1", "Kategori2", ...]
-Liste uzunluğu tam olarak kalem sayısı kadar olmalı ve sırayı korumalı."""
+Return ONLY a JSON list in this exact format, nothing else:
+["Category1", "Category2", ...]
+The list length must exactly match the number of items, preserving order."""
 
     resp = client.messages.create(
         model="claude-sonnet-4-5",
@@ -147,28 +206,28 @@ Liste uzunluğu tam olarak kalem sayısı kadar olmalı ve sırayı korumalı.""
     )
     raw = resp.content[0].text.strip()
     raw = re.sub(r"^```(json)?|```$", "", raw, flags=re.MULTILINE).strip()
-    categories = json.loads(raw)
+    ai_categories = json.loads(raw)
 
-    for item, cat in zip(items, categories):
-        item["kategori"] = cat if cat in CATEGORIES else "Diğer"
+    for item, cat in zip(items, ai_categories):
+        item["category"] = cat if cat in categories else lang["other_category"]
     return items
 
 
 # --------------------------------------------------------------------------
-# Excel raporu
+# Excel report
 # --------------------------------------------------------------------------
 
 HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 
 
-def build_excel(header: dict, items: list[dict], out_path: Path) -> None:
+def build_excel(header: dict, items: list[dict], out_path: Path, lang: dict) -> None:
     wb = Workbook()
 
-    # --- Detay sayfası ---
+    # --- Detail sheet ---
     ws = wb.active
-    ws.title = "Fatura Detay"
-    cols = ["Açıklama", "Miktar", "Birim Fiyat", "Tutar", "Kategori"]
+    ws.title = lang["sheet_detail"]
+    cols = lang["columns"]
     ws.append(cols)
     for c in range(1, len(cols) + 1):
         cell = ws.cell(row=1, column=c)
@@ -177,42 +236,41 @@ def build_excel(header: dict, items: list[dict], out_path: Path) -> None:
         cell.alignment = Alignment(horizontal="center")
 
     for item in items:
-        ws.append(
-            [item["aciklama"], item["miktar"], item["birim_fiyat"], item["tutar"], item["kategori"]]
-        )
+        ws.append([item["description"], item["qty"], item["unit_price"], item["total"], item["category"]])
 
     for c in range(1, len(cols) + 1):
         ws.column_dimensions[get_column_letter(c)].width = 24
     for row in ws.iter_rows(min_row=2, min_col=3, max_col=4):
         for cell in row:
-            cell.number_format = "#,##0.00 TL"
+            cell.number_format = lang["currency_format"]
 
-    # --- Özet sayfası ---
-    ws2 = wb.create_sheet("Özet")
-    ws2.append(["Fatura No", header.get("fatura_no", "")])
-    ws2.append(["Tarih", header.get("tarih", "")])
-    ws2.append(["Satıcı", header.get("satici", "")])
+    # --- Summary sheet ---
+    ws2 = wb.create_sheet(lang["sheet_summary"])
+    labels = lang["summary_labels"]
+    ws2.append([labels["invoice_no"], header.get("invoice_no", "")])
+    ws2.append([labels["date"], header.get("date", "")])
+    ws2.append([labels["vendor"], header.get("vendor", "")])
     ws2.append([])
-    ws2.append(["Kategori", "Toplam Tutar"])
-    for c in range(5, 7):
-        cell = ws2.cell(row=5, column=c - 4)
+    ws2.append(lang["summary_headers"])
+    for c in range(1, 3):
+        cell = ws2.cell(row=5, column=c)
         cell.font = HEADER_FONT
         cell.fill = HEADER_FILL
 
     totals: dict[str, float] = {}
     for item in items:
-        totals[item["kategori"]] = totals.get(item["kategori"], 0.0) + item["tutar"]
+        totals[item["category"]] = totals.get(item["category"], 0.0) + item["total"]
 
     for cat, total in sorted(totals.items(), key=lambda kv: -kv[1]):
         ws2.append([cat, total])
     ws2.append([])
-    ws2.append(["GENEL TOPLAM", sum(item["tutar"] for item in items)])
+    ws2.append([lang["grand_total"], sum(item["total"] for item in items)])
     ws2["A" + str(ws2.max_row)].font = Font(bold=True)
     ws2["B" + str(ws2.max_row)].font = Font(bold=True)
 
     for row in ws2.iter_rows(min_row=6, min_col=2, max_col=2):
         for cell in row:
-            cell.number_format = "#,##0.00 TL"
+            cell.number_format = lang["currency_format"]
     ws2.column_dimensions["A"].width = 24
     ws2.column_dimensions["B"].width = 18
 
@@ -225,40 +283,43 @@ def build_excel(header: dict, items: list[dict], out_path: Path) -> None:
 # --------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="PDF faturayı Excel raporuna dönüştürür.")
-    parser.add_argument("pdf", type=Path, help="Girdi PDF fatura dosyası")
-    parser.add_argument("-o", "--output", type=Path, default=Path("output/rapor.xlsx"))
-    parser.add_argument("--no-ai", action="store_true", help="AI kategorizasyonu kullanma")
+    parser = argparse.ArgumentParser(description="Converts a PDF invoice into an Excel report.")
+    parser.add_argument("pdf", type=Path, help="Input PDF invoice file")
+    parser.add_argument("-o", "--output", type=Path, default=Path("output/report.xlsx"))
+    parser.add_argument("--lang", choices=["en", "tr"], default="en", help="Output language (column headers, categories)")
+    parser.add_argument("--no-ai", action="store_true", help="Disable AI categorization")
     args = parser.parse_args()
 
+    lang = LANGS[args.lang]
+
     if not args.pdf.exists():
-        sys.exit(f"Hata: {args.pdf} bulunamadı")
+        sys.exit(f"Error: {args.pdf} not found")
 
     text = extract_text(args.pdf)
-    header = extract_header_fields(text)
-    items = extract_line_items(args.pdf)
+    header = extract_header_fields(text, lang)
+    items = extract_line_items(args.pdf, lang)
 
     if not items:
-        sys.exit("Hata: PDF içinde tanınabilir bir fatura tablosu bulunamadı.")
+        sys.exit("Error: no recognizable invoice table found in the PDF.")
 
     use_ai = not args.no_ai
     if use_ai:
         try:
-            items = categorize_with_ai(items)
+            items = categorize_with_ai(items, lang)
             mode = "AI (Claude)"
-        except Exception as e:  # API anahtarı yok / hata -> fallback
-            print(f"[uyarı] AI kategorizasyon kullanılamadı ({e}); anahtar kelime moduna geçiliyor.")
-            items = categorize_with_keywords(items)
-            mode = "Anahtar kelime (fallback)"
+        except Exception as e:  # no API key / error -> fallback
+            print(f"[warning] AI categorization unavailable ({e}); falling back to keyword mode.")
+            items = categorize_with_keywords(items, lang)
+            mode = "Keyword (fallback)"
     else:
-        items = categorize_with_keywords(items)
-        mode = "Anahtar kelime (--no-ai)"
+        items = categorize_with_keywords(items, lang)
+        mode = "Keyword (--no-ai)"
 
-    build_excel(header, items, args.output)
+    build_excel(header, items, args.output, lang)
 
-    print(f"✅ Rapor oluşturuldu: {args.output}")
-    print(f"   Kategorizasyon modu: {mode}")
-    print(f"   {len(items)} kalem işlendi, genel toplam: {sum(i['tutar'] for i in items):,.2f} TL")
+    print(f"✅ Report created: {args.output}")
+    print(f"   Categorization mode: {mode}")
+    print(f"   {len(items)} items processed, grand total: {sum(i['total'] for i in items):,.2f}")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,10 @@ Bu proje bir **Fiverr/Upwork gig'i için portföy/demo** amacıyla hazırlanmı�
 "PDF faturadan Excel'e otomatik veri aktarma" ve "AI destekli Excel veri
 temizleme/kategorize etme" hizmetlerinin uçtan uca çalışan bir kanıtıdır.
 
+**Çıktı dili** (`--lang en` / `--lang tr`) faturanın hangi dilde olduğundan
+bağımsızdır — varsayılan İngilizce (uluslararası müşteriler için), Türkçe
+müşteriler için `--lang tr` ile kolonlar ve kategoriler Türkçeye döner.
+
 ## Özellikler
 
 - 📄 PDF'deki fatura tablosunu otomatik tanır ve satırlara ayırır
@@ -31,20 +35,24 @@ pip install -r requirements.txt
 ## Kullanım
 
 ```bash
-# Örnek bir demo fatura PDF'i üret
+# İki demo fatura üretir: sample_data/invoice_sample_en.pdf (EN) ve
+# sample_data/fatura_ornek.pdf (TR)
 python generate_sample.py
 
-# Faturayı işle (AI varsa otomatik kullanılır)
+# İngilizce çıktı (varsayılan) — AI varsa otomatik kullanılır
 export ANTHROPIC_API_KEY=sk-...   # opsiyonel
-python extract.py sample_data/fatura_ornek.pdf -o output/rapor.xlsx
+python extract.py sample_data/invoice_sample_en.pdf -o output/report.xlsx
+
+# Türkçe çıktı için:
+python extract.py sample_data/fatura_ornek.pdf -o output/rapor.xlsx --lang tr
 
 # AI'yı zorla kapatmak için:
-python extract.py sample_data/fatura_ornek.pdf -o output/rapor.xlsx --no-ai
+python extract.py sample_data/invoice_sample_en.pdf -o output/report.xlsx --no-ai
 ```
 
-Çıktı `output/rapor.xlsx` olarak oluşur: "Fatura Detay" sayfasında her kalem
-+ atanmış kategorisi, "Özet" sayfasında fatura bilgileri ve kategori bazlı
-toplamlar yer alır.
+Çıktı belirttiğin `-o` yoluna oluşur: "Detay" sayfasında her kalem + atanmış
+kategorisi, "Özet" sayfasında fatura bilgileri ve kategori bazlı toplamlar
+yer alır — sayfa/kolon isimleri seçtiğin `--lang`'a göre değişir.
 
 ## Nasıl çalışır?
 
