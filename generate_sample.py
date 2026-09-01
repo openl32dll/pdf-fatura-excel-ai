@@ -19,7 +19,9 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 # Standart Helvetica fontu Türkçe karakterleri (ı, ş, ğ, ç, ö, ü) doğru
 # encode etmiyor -> Unicode destekli bir TrueType font kaydediyoruz.
-FONT_DIR = Path("/usr/share/fonts/truetype/dejavu")
+# İşletim sisteminden bağımsız çalışması için font, sistemden aranmak yerine
+# doğrudan proje içine (fonts/) gömülüdür.
+FONT_DIR = Path(__file__).parent / "fonts"
 pdfmetrics.registerFont(TTFont("DejaVuSans", FONT_DIR / "DejaVuSans.ttf"))
 pdfmetrics.registerFont(TTFont("DejaVuSans-Bold", FONT_DIR / "DejaVuSans-Bold.ttf"))
 pdfmetrics.registerFontFamily("DejaVuSans", normal="DejaVuSans", bold="DejaVuSans-Bold")
